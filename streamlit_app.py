@@ -1,56 +1,90 @@
 import streamlit as st
-from openai import OpenAI
+from transformers import AutoTokenizer, AutoModelForSeq2SeqLM
+from peft import PeftModel, PeftConfig
+import torch
 
-# Show title and description.
-st.title("💬 Chatbot")
+# Title and description
+st.title("💬 Chatbot Using Fine-Tuned T5")
 st.write(
-    "This is a simple chatbot that uses OpenAI's GPT-3.5 model to generate responses. "
-    "To use this app, you need to provide an OpenAI API key, which you can get [here](https://platform.openai.com/account/api-keys). "
-    "You can also learn how to build this app step by step by [following our tutorial](https://docs.streamlit.io/develop/tutorials/llms/build-conversational-apps)."
+    "This chatbot uses a fine-tuned T5 model hosted on Hugging Face to generate responses. "
+    "You can interact with the chatbot below."
 )
 
-# Ask user for their OpenAI API key via `st.text_input`.
-# Alternatively, you can store the API key in `./.streamlit/secrets.toml` and access it
-# via `st.secrets`, see https://docs.streamlit.io/develop/concepts/connections/secrets-management
-openai_api_key = st.text_input("OpenAI API Key", type="password")
-if not openai_api_key:
-    st.info("Please add your OpenAI API key to continue.", icon="🗝️")
-else:
+@st.cache_resource
+def load_model():
+    try:
+        model_name = "pawanreddy/peft_t5_fine_tuned_model"
+        st.write(f"Loading model from Hugging Face Hub: {model_name}")
+        
+        # Load the tokenizer
+        tokenizer = AutoTokenizer.from_pretrained(model_name)
+        
+        # Load the base T5 model
+        base_model_name = "google/t5-base-lm-adapt"  # Base model used for fine-tuning
+        base_model = AutoModelForSeq2SeqLM.from_pretrained(base_model_name)
+        
+        # Load PEFT adapter configuration
+        peft_config = PeftConfig.from_pretrained(model_name)
+        
+        # Apply the PEFT adapter to the base model
+        model = PeftModel.from_pretrained(base_model, model_name)
+        
+        st.write("Model loaded successfully!")
+        return tokenizer, model
+    except Exception as e:
+        st.error(f"Failed to load model: {e}")
+        raise
 
-    # Create an OpenAI client.
-    client = OpenAI(api_key=openai_api_key)
+tokenizer, model = load_model()
 
-    # Create a session state variable to store the chat messages. This ensures that the
-    # messages persist across reruns.
-    if "messages" not in st.session_state:
-        st.session_state.messages = []
+# Initialize session state for chat messages
+if "messages" not in st.session_state:
+    st.session_state.messages = []
 
-    # Display the existing chat messages via `st.chat_message`.
-    for message in st.session_state.messages:
-        with st.chat_message(message["role"]):
-            st.markdown(message["content"])
+# Display chat history
+for message in st.session_state.messages:
+    with st.chat_message(message["role"]):
+        st.markdown(message["content"])
 
-    # Create a chat input field to allow the user to enter a message. This will display
-    # automatically at the bottom of the page.
-    if prompt := st.chat_input("What is up?"):
+# Chat input field
+if user_input := st.chat_input("Type your message here..."):
 
-        # Store and display the current prompt.
-        st.session_state.messages.append({"role": "user", "content": prompt})
-        with st.chat_message("user"):
-            st.markdown(prompt)
+    # Display the user's input
+    st.session_state.messages.append({"role": "user", "content": user_input})
+    with st.chat_message("user"):
+        st.markdown(user_input)
 
-        # Generate a response using the OpenAI API.
-        stream = client.chat.completions.create(
-            model="gpt-3.5-turbo",
-            messages=[
-                {"role": m["role"], "content": m["content"]}
-                for m in st.session_state.messages
-            ],
-            stream=True,
-        )
+    # Generate a response from the fine-tuned model
+    with st.chat_message("assistant"):
+        with st.spinner("Thinking..."):
+            # Move model and inputs to the appropriate device
+            device = "cuda" if torch.cuda.is_available() else "cpu"
+            input_ids = tokenizer(
+                f"Generate the content of the article titled '{user_input}'",
+                return_tensors="pt",
+                truncation=True,
+                max_length=512
+            ).input_ids.to(device)
+            model.to(device)
 
-        # Stream the response to the chat using `st.write_stream`, then store it in 
-        # session state.
-        with st.chat_message("assistant"):
-            response = st.write_stream(stream)
+            # Generate response using Seq2Seq-specific generation
+            output_ids = model.generate(
+                input_ids=input_ids,
+                max_length=200,
+                num_return_sequences=1,
+                no_repeat_ngram_size=2,
+                temperature=0.9,
+                do_sample=True,
+                top_k=50,
+                top_p=0.9,
+                pad_token_id=tokenizer.pad_token_id,
+                eos_token_id=tokenizer.eos_token_id,
+                early_stopping=True,
+            )
+            response = tokenizer.decode(output_ids[0], skip_special_tokens=True).strip()
+            if not response.strip() or "?" in response:
+                response = "I'm sorry, I didn't understand that. Can you please rephrase?"
+
+        # Display the assistant's response
+        st.markdown(response)
         st.session_state.messages.append({"role": "assistant", "content": response})
